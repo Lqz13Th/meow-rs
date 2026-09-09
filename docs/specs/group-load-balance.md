@@ -9,6 +9,14 @@ URLTest/Fallback/Selector.
 Related gap-analysis row: §proxy-groups "load-balance — enum variant
 exists, no group impl".
 
+> **Implementation status (2026-09, issue #485):** load-balance groups now join
+> the same periodic health-check sweep as `url-test`/`fallback`. `extract_specs`
+> (`crates/meow-app/src/health_check.rs`) emits a `HealthCheckSpec` for a
+> `load-balance` group, so its members are probed against `url` every
+> `interval` seconds (default 300); `lazy: true` defers probing until the group
+> next carries traffic. The `url`, `interval`, and `lazy` fields are therefore
+> effective, matching mihomo mainline.
+
 ## Motivation
 
 `type: load-balance` is the fourth proxy group type after Selector,
@@ -67,9 +75,9 @@ proxy-groups:
       - proxy-b
       - proxy-c
     url: https://www.gstatic.com/generate_204
-    interval: 300          # health-check sweep interval, seconds
+    interval: 300          # health-check sweep interval in seconds
     strategy: round-robin  # round-robin (default) | consistent-hashing
-    lazy: false            # if true, defer first health-check until first use
+    lazy: false            # defer the sweep until the group carries traffic
 ```
 
 Field reference:
@@ -77,10 +85,10 @@ Field reference:
 | Field | Type | Required | Default | Meaning |
 |-------|------|:-------:|---------|---------|
 | `proxies` | `[]string` | yes | — | Named proxies or groups to balance across. Same resolution as Selector. |
-| `url` | string | no | `https://www.gstatic.com/generate_204` | Health-check probe URL. |
-| `interval` | integer | no | `300` | Health-check sweep interval in seconds. `0` = no background sweep; group still skips proxies known dead from other groups' sweeps. |
+| `url` | string | no | `https://www.gstatic.com/generate_204` | Health-check probe URL. Members are probed against it by the periodic sweep. |
+| `interval` | integer | no | `300` | Health-check sweep interval in seconds. Each member is probed every `interval` seconds; a member whose probe fails is skipped by both strategies until it recovers. |
 | `strategy` | enum | no | `round-robin` | Selection strategy. |
-| `lazy` | bool | no | `false` | If true, defer first health-check probe until the group's first connection attempt. |
+| `lazy` | bool | no | `false` | When `true`, the periodic sweep is deferred until the group next carries traffic (matching `url-test`/`fallback`). |
 
 **Divergences from upstream** (classified per
 [ADR-0002](../adr/0002-upstream-divergence-policy.md)):
@@ -175,18 +183,25 @@ comment; do not optimize now.
 
 ### Health-check integration
 
-`LoadBalanceGroup` uses the same health-check infrastructure as
-`UrlTestGroup`:
+`LoadBalanceGroup` participates in the same periodic health-check sweep as
+`url-test`/`fallback`, driven from `crates/meow-app/src/health_check.rs`:
 
-- Has a `url: String` and `interval: Duration` config.
-- Background sweep task (spawned by `main.rs`) calls `p.touch_url(url)` on
-  each proxy, which updates `p.alive()` and `p.last_delay()`.
-- The group's `select()` reads `p.alive()` — no additional locking
-  needed; `alive()` is already thread-safe on `ProxyHealth`.
-
-Engineer: copy the spawn pattern from `UrlTestGroup` in `main.rs`.
-The sweep task does not need to be inside the group struct — it just
-needs `Arc<LoadBalanceGroup>` to call `update_health()`.
+- `extract_specs` reads the raw group config and emits a `HealthCheckSpec`
+  (`group_name`, `url`, `interval_secs`, `lazy`) for every `load-balance`
+  group, using the shared defaults (`url` →
+  `http://www.gstatic.com/generate_204`, `interval` → 300 s, `lazy` → false).
+- `run_health_check_loop` ticks every `interval` seconds. Each tick resolves
+  the group's `members()` to their `Arc<dyn Proxy>` and probes them via
+  `meow_proxy::health::probe_many_bounded(members, &spec.url, …)`, which
+  records each result into that member's shared `ProxyHealth`
+  (`record_delay`; `alive = delay > 0`).
+- `select()` reads `p.alive()` on each member — no extra locking; the sweep
+  and the group hold the same `Arc<dyn Proxy>`, so a recorded probe result is
+  immediately visible to selection.
+- `lazy: true` gates probing on `usage_generation()`: `LoadBalanceGroup` bumps
+  a `UsageTracker` on every user dial (`dial_tcp` / `dial_udp` /
+  `unwrap_proxy`), and the loop skips ticks until the generation advances, so
+  an idle lazy group is not probed.
 
 ### `dial_tcp` / `dial_udp`
 

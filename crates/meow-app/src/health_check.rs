@@ -16,7 +16,12 @@ pub struct HealthCheckSpec {
 pub fn extract_specs(raw_groups: &[meow_config::raw::RawProxyGroup]) -> Vec<HealthCheckSpec> {
     raw_groups
         .iter()
-        .filter(|g| matches!(g.group_type.as_str(), "fallback" | "url-test"))
+        .filter(|g| {
+            matches!(
+                g.group_type.as_str(),
+                "fallback" | "url-test" | "load-balance"
+            )
+        })
         .map(|g| HealthCheckSpec {
             group_name: g.name.clone(),
             url: g.url.as_deref().unwrap_or(DEFAULT_URL).to_string(),
@@ -140,6 +145,26 @@ mod tests {
         };
         let specs = extract_specs(&[group]);
         assert_eq!(specs[0].interval_secs, DEFAULT_INTERVAL_SECS);
+    }
+
+    #[test]
+    fn extract_specs_includes_load_balance_with_defaults() {
+        // #485: load-balance groups must be health-checked, honoring url/interval/lazy.
+        let group = meow_config::raw::RawProxyGroup {
+            name: "lb".into(),
+            group_type: "load-balance".into(),
+            ..Default::default()
+        };
+        let specs = extract_specs(&[group]);
+        assert_eq!(
+            specs.len(),
+            1,
+            "load-balance must produce a health-check spec"
+        );
+        assert_eq!(specs[0].group_name, "lb");
+        assert_eq!(specs[0].url, DEFAULT_URL);
+        assert_eq!(specs[0].interval_secs, DEFAULT_INTERVAL_SECS);
+        assert!(!specs[0].lazy);
     }
 
     #[test]
