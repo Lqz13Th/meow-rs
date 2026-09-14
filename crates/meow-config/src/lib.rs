@@ -3797,7 +3797,8 @@ rule-providers:
     }
 }
 
-/// `fallback` / `url-test` proxy groups get periodic health checks —
+/// `fallback` / `url-test` / `load-balance` proxy groups get periodic
+/// health checks (load-balance since issue #485) —
 /// extract their probe specs from the raw group list (issue #514). Last
 /// duplicate name wins, matching how `load_config` resolves duplicates —
 /// including a checkable declaration followed by a same-named
@@ -3817,7 +3818,12 @@ pub fn extract_health_check_specs(
         }
     }
     last.iter()
-        .filter(|g| matches!(g.group_type.as_str(), "fallback" | "url-test"))
+        .filter(|g| {
+            matches!(
+                g.group_type.as_str(),
+                "fallback" | "url-test" | "load-balance"
+            )
+        })
         .filter_map(|g| {
             // Upstream `HealthCheck.auto()` is `interval != 0`: an explicit
             // `interval: 0` DISABLES periodic checks (manual/on-demand

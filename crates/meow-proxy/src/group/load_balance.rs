@@ -763,4 +763,24 @@ mod tests {
         let _ = group.dial_tcp(&meta_no_src()).await;
         assert_eq!(group.usage_generation(), 1, "dial records group use");
     }
+
+    #[tokio::test]
+    async fn health_probe_dials_do_not_count_as_use() {
+        // Sweep probes dial members with `ConnType::Tunnel`; if that bumped the
+        // usage generation a lazy group would keep itself awake forever.
+        // Mirrors fallback.rs::health_probe_dials_do_not_count_as_use.
+        let group = make_rr(vec![MockProxy::new("A")]);
+        let probe_meta = Metadata {
+            conn_type: ConnType::Tunnel,
+            ..meta_no_src()
+        };
+        let _ = group.dial_tcp(&probe_meta).await;
+        assert_eq!(
+            group.usage_generation(),
+            0,
+            "probe dials must not mark the group as used"
+        );
+        let _ = group.dial_tcp(&meta_no_src()).await;
+        assert_eq!(group.usage_generation(), 1, "real traffic still marks use");
+    }
 }

@@ -2557,6 +2557,22 @@ fn parse_proxy_group_inner(
             Ok(Arc::new(group))
         }
         "load-balance" => {
+            // Class B (ADR-0002): LoadBalanceGroup has no provider slots yet,
+            // so `use:` / `include-all` members are dropped here. Warn rather
+            // than build a silently-empty group; full support tracked in #555.
+            let has_use = config
+                .use_providers
+                .as_deref()
+                .is_some_and(|u| !u.is_empty());
+            if has_use || config.include_all.unwrap_or(false) {
+                tracing::warn!(
+                    group = %config.name,
+                    "load-balance: 'use'/'include-all' provider members are not \
+                     supported yet and will be ignored; only static 'proxies' \
+                     members are balanced. (upstream: supported; we warn — \
+                     Class B ADR-0002)"
+                );
+            }
             let strategy = parse_lb_strategy(config.strategy.as_deref())?;
             Ok(Arc::new(LoadBalanceGroup::new(
                 &config.name,
@@ -3306,6 +3322,55 @@ tls: true
         };
         parse_proxy_group(&config, &existing, &Default::default())
             .expect("relay with url+interval must not hard-error");
+    }
+
+    // ─── load-balance ignores provider members (issue #485 / #555) ──────────
+
+    fn lb_config_with_providers(
+        use_providers: Option<Vec<String>>,
+        include_all: Option<bool>,
+    ) -> crate::raw::RawProxyGroup {
+        crate::raw::RawProxyGroup {
+            name: "lb".to_string(),
+            group_type: "load-balance".to_string(),
+            proxies: Some(vec!["DIRECT".to_string(), "REJECT".to_string()]),
+            use_providers,
+            include_all,
+            ..Default::default()
+        }
+    }
+
+    fn direct_reject() -> HashMap<SmolStr, Arc<dyn Proxy>> {
+        let mut m = HashMap::new();
+        m.insert(SmolStr::new_static("DIRECT"), make_direct_proxy("DIRECT"));
+        m.insert(SmolStr::new_static("REJECT"), make_direct_proxy("REJECT"));
+        m
+    }
+
+    // `use:` on load-balance → warn, static members still balanced (Class B).
+    #[test]
+    fn load_balance_use_providers_warns_not_errors() {
+        let config = lb_config_with_providers(Some(vec!["airport".to_string()]), None);
+        let group = parse_proxy_group(&config, &direct_reject(), &Default::default())
+            .expect("load-balance with use: must not hard-error");
+        assert_eq!(
+            group.members().unwrap_or_default().len(),
+            2,
+            "static members are kept"
+        );
+    }
+
+    // `include-all` on load-balance → warn, static members still balanced.
+    #[test]
+    fn load_balance_include_all_warns_not_errors() {
+        let config = lb_config_with_providers(None, Some(true));
+        let group = parse_proxy_group(&config, &direct_reject(), &Default::default())
+            .expect("load-balance with include-all must not hard-error");
+        assert_eq!(
+            group.members().unwrap_or_default().len(),
+            2,
+            "static members are kept"
+        );
     }
 
     // ─── group-level filter on provider members (issue #358) ────────────────

@@ -273,6 +273,18 @@ mod tests {
         assert_eq!(sup.task_count(), 0, "interval 0 removes the task");
     }
 
+    /// Issue #485: `load-balance` accepts `url`/`interval`/`lazy` and must
+    /// be swept like `url-test`/`fallback` instead of silently never probing.
+    #[test]
+    fn extract_specs_includes_load_balance_with_defaults() {
+        let specs = extract_specs(&[raw_group("lb", "load-balance", None)]);
+        assert_eq!(specs.len(), 1, "load-balance must produce a probe spec");
+        assert_eq!(specs[0].group_name, "lb");
+        assert_eq!(specs[0].url, "https://www.gstatic.com/generate_204");
+        assert_eq!(specs[0].interval_secs, 300);
+        assert!(!specs[0].lazy);
+    }
+
     /// A task that died on its own is restarted at the next reconcile.
     #[tokio::test]
     async fn reconcile_restarts_dead_tasks() {
