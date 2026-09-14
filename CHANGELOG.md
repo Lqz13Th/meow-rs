@@ -96,8 +96,9 @@ the canonical, in-repo source a release is cut from.
   mihomo remain and are tracked in #555: `lazy` still defaults to `false`
   (upstream `true`, shared with `url-test`/`fallback`), and `select`/`relay`
   members are still not swept. A `load-balance` group with `use:` or
-  `include-all` now logs a warning that provider members are ignored instead
-  of silently building an empty group. See #485.
+  `include-all` now logs a warning that provider members are ignored; a
+  provider-only group still parses but ends up with no members, so the
+  warning is the signal to look for. See #485.
 
 - Hysteria2 authentication no longer advertises HTTP/3 datagrams, preventing
   the server's HTTP/3 receiver from consuming raw QUIC UDP relay packets.

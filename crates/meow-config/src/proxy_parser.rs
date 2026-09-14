@@ -3326,6 +3326,39 @@ tls: true
 
     // ─── load-balance ignores provider members (issue #485 / #555) ──────────
 
+    const LB_PROVIDER_WARN: &str = "'use'/'include-all' provider members are not supported yet";
+
+    /// Scoped WARN capture — `with_default` is thread-local, so parallel tests
+    /// in this binary don't see each other's lines.
+    fn capture_warns<R>(f: impl FnOnce() -> R) -> (R, String) {
+        #[derive(Clone)]
+        struct Sink(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Sink;
+            fn make_writer(&'a self) -> Sink {
+                self.clone()
+            }
+        }
+        let sink = Sink(Arc::new(std::sync::Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let out = tracing::subscriber::with_default(subscriber, f);
+        let captured = sink.0.lock().unwrap();
+        (out, String::from_utf8_lossy(&captured).into_owned())
+    }
+
     fn lb_config_with_providers(
         use_providers: Option<Vec<String>>,
         include_all: Option<bool>,
@@ -3351,12 +3384,17 @@ tls: true
     #[test]
     fn load_balance_use_providers_warns_not_errors() {
         let config = lb_config_with_providers(Some(vec!["airport".to_string()]), None);
-        let group = parse_proxy_group(&config, &direct_reject(), &Default::default())
-            .expect("load-balance with use: must not hard-error");
+        let (group, logs) =
+            capture_warns(|| parse_proxy_group(&config, &direct_reject(), &Default::default()));
+        let group = group.expect("load-balance with use: must not hard-error");
         assert_eq!(
             group.members().unwrap_or_default().len(),
             2,
             "static members are kept"
+        );
+        assert!(
+            logs.contains(LB_PROVIDER_WARN),
+            "expected provider warning, got: {logs}"
         );
     }
 
@@ -3364,12 +3402,57 @@ tls: true
     #[test]
     fn load_balance_include_all_warns_not_errors() {
         let config = lb_config_with_providers(None, Some(true));
-        let group = parse_proxy_group(&config, &direct_reject(), &Default::default())
-            .expect("load-balance with include-all must not hard-error");
+        let (group, logs) =
+            capture_warns(|| parse_proxy_group(&config, &direct_reject(), &Default::default()));
+        let group = group.expect("load-balance with include-all must not hard-error");
         assert_eq!(
             group.members().unwrap_or_default().len(),
             2,
             "static members are kept"
+        );
+        assert!(
+            logs.contains(LB_PROVIDER_WARN),
+            "expected provider warning, got: {logs}"
+        );
+    }
+
+    // No provider fields → no warning (the warning is keyed on the raw config).
+    #[test]
+    fn load_balance_without_providers_does_not_warn() {
+        let config = lb_config_with_providers(None, None);
+        let (group, logs) =
+            capture_warns(|| parse_proxy_group(&config, &direct_reject(), &Default::default()));
+        group.expect("plain load-balance must parse");
+        assert!(
+            !logs.contains(LB_PROVIDER_WARN),
+            "no provider fields must not warn, got: {logs}"
+        );
+    }
+
+    // A `use:`-only group whose provider exists passes the non-empty guard on
+    // the provider slot, then builds with no members — the warning is the only
+    // signal (#555 item 3).
+    #[cfg(feature = "ss")]
+    #[tokio::test]
+    async fn load_balance_provider_only_builds_empty_with_warning() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let providers = file_provider_with(tmp.path(), PROVIDER_YAML).await;
+        let config = crate::raw::RawProxyGroup {
+            name: "lb".to_string(),
+            group_type: "load-balance".to_string(),
+            use_providers: Some(vec!["airport".to_string()]),
+            ..Default::default()
+        };
+        let (group, logs) =
+            capture_warns(|| parse_proxy_group(&config, &HashMap::new(), &providers));
+        let group = group.expect("provider-only load-balance passes the non-empty guard");
+        assert!(
+            group.members().unwrap_or_default().is_empty(),
+            "provider members are dropped at build time"
+        );
+        assert!(
+            logs.contains(LB_PROVIDER_WARN),
+            "expected provider warning, got: {logs}"
         );
     }
 
